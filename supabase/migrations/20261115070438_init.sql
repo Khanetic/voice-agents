@@ -172,16 +172,17 @@ end $$;
 -- Called by the API with the service-role key only.
 -- owner_id and capacity are read from the agents row, never taken from the
 -- caller: security definer bypasses RLS, so the function must not trust input.
+-- Returns a set: one row when booked, no rows when the slot is full. Over REST
+-- that is [{...}] or [], never an object full of nulls that looks like success.
 -- ---------------------------------------------------------------------------
 create or replace function public.book_appointment(p jsonb)
-returns public.appointments
+returns setof public.appointments
 language plpgsql security definer set search_path = public as $$
 declare
     v_agent_id uuid := (p->>'agent_id')::uuid;  -- cast normalises the UUID text form
     v_owner_id uuid;
     v_capacity int;
     taken int;
-    rec public.appointments;
 begin
     -- Lock first, so capacity and existing bookings are read in one protected window.
     -- Hash the normalised uuid text: 'A1B2...' and 'a1b2...' must share one lock.
@@ -203,18 +204,17 @@ begin
       and ends_at   > (p->>'starts_at')::timestamptz;
 
     if taken >= v_capacity then
-        return null;
+        return;                 -- full: empty result set
     end if;
 
+    return query
     insert into appointments (owner_id, agent_id, customer_id, call_id, service,
                               starts_at, ends_at, party_size, notes, details, source)
     values (v_owner_id, v_agent_id, (p->>'customer_id')::uuid,
             (p->>'call_id')::uuid, p->>'service', (p->>'starts_at')::timestamptz,
             (p->>'ends_at')::timestamptz, (p->>'party_size')::int, p->>'notes',
             coalesce(p->'details', '{}'::jsonb), coalesce(p->>'source', 'voice'))
-    returning * into rec;
-
-    return rec;
+    returning *;
 end $$;
 
 revoke execute on function public.book_appointment(jsonb) from public, anon, authenticated;
