@@ -34,7 +34,7 @@ create table public.agents (
     services jsonb not null default '[]'::jsonb,
     capacity int not null default 1 check (capacity between 1 and 500),
     slot_interval_min int not null default 30 check (slot_interval_min between 5 and 240),
-    max_party_size int,
+    max_party_size int check (max_party_size > 0),
     is_public boolean not null default false,
     enabled_tools text[],                       -- null = template defaults; must be a subset of the template's tools
     elevenlabs_agent_id text,
@@ -67,20 +67,26 @@ create table public.calls (
     agent_id uuid not null references public.agents(id) on delete cascade,
     provider text not null default 'elevenlabs',
     external_id text,                           -- e.g. ElevenLabs conversation id
-    channel text not null default 'web_voice',
-    status text not null default 'active',
+    channel text not null default 'web_voice'
+        check (channel in ('web_voice','web_chat','phone')),
+    status text not null default 'active'
+        check (status in ('active','completed','failed')),
     started_at timestamptz not null default now(),
     ended_at timestamptz,
-    duration_sec int,
+    duration_sec int check (duration_sec >= 0),
     transcript jsonb not null default '[]'::jsonb,
     summary text,
-    outcome text,
-    cost_usd numeric(10,4),
+    -- set by the post-call job; null while the call is active.
+    -- answered = questions / status lookups only, no_action = nothing achieved.
+    outcome text check (outcome in ('booked','cancelled','message','ticket',
+                                    'escalated','emergency','answered','no_action')),
+    cost_usd numeric(10,4) check (cost_usd >= 0),
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
 create unique index on public.calls (provider, external_id) where external_id is not null;
 create index on public.calls (agent_id, started_at desc);
+create index on public.calls (owner_id);
 
 -- ---------------------------------------------------------------------------
 -- appointments: bookings; details holds industry fields (stylist, address...)
@@ -94,7 +100,7 @@ create table public.appointments (
     service text not null,
     starts_at timestamptz not null,
     ends_at timestamptz not null,
-    party_size int,
+    party_size int check (party_size > 0),
     status text not null default 'booked'
         check (status in ('booked','cancelled','completed','no_show')),
     notes text,
@@ -105,6 +111,7 @@ create table public.appointments (
     check (ends_at > starts_at)
 );
 create index on public.appointments (agent_id, starts_at) where status = 'booked';
+create index on public.appointments (owner_id);
 
 -- ---------------------------------------------------------------------------
 -- inbox_items: work the agent hands to people
@@ -125,6 +132,7 @@ create table public.inbox_items (
     updated_at timestamptz not null default now()
 );
 create index on public.inbox_items (agent_id, status, created_at desc);
+create index on public.inbox_items (owner_id);
 
 -- ---------------------------------------------------------------------------
 -- status_records: order / job statuses the agent may read out (lookup_status)
@@ -143,12 +151,15 @@ create table public.status_records (
     updated_at timestamptz not null default now(),
     unique (agent_id, kind, reference)
 );
+create index on public.status_records (owner_id);
 
 -- ---------------------------------------------------------------------------
 -- updated_at triggers + row-level security on every table
+-- RLS uses (select auth.uid()) so Postgres evaluates it once per query
+-- (an initPlan) instead of once per row.
 -- ---------------------------------------------------------------------------
 create or replace function public.touch_updated_at() returns trigger
-language plpgsql as $$
+language plpgsql set search_path = '' as $$
 begin
     new.updated_at = now();
     return new;
@@ -162,7 +173,8 @@ begin
                         for each row execute function public.touch_updated_at()', t);
         execute format('alter table public.%I enable row level security', t);
         execute format('create policy "owner_all" on public.%I for all
-                        using (owner_id = auth.uid()) with check (owner_id = auth.uid())', t);
+                        using (owner_id = (select auth.uid()))
+                        with check (owner_id = (select auth.uid()))', t);
     end loop;
 end $$;
 
