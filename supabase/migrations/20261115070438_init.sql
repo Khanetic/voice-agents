@@ -1,5 +1,7 @@
 -- Initial schema (guide Rev 2, Step 2): 6 tables, RLS, updated_at triggers,
 -- and an atomic booking function that prevents double bookings.
+-- Child tables reference parents by (id, owner_id), so a row can never point
+-- to another business's agent, customer or call.
 
 create extension if not exists pgcrypto;
 
@@ -39,7 +41,8 @@ create table public.agents (
     enabled_tools text[],                       -- null = template defaults; must be a subset of the template's tools
     elevenlabs_agent_id text,
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    unique (id, owner_id)
 );
 create index on public.agents (owner_id);
 
@@ -55,7 +58,8 @@ create table public.customers (
     notes text,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    unique (owner_id, phone)
+    unique (owner_id, phone),
+    unique (id, owner_id)
 );
 
 -- ---------------------------------------------------------------------------
@@ -64,7 +68,7 @@ create table public.customers (
 create table public.calls (
     id uuid primary key default gen_random_uuid(),
     owner_id uuid not null references auth.users(id) on delete cascade,
-    agent_id uuid not null references public.agents(id) on delete cascade,
+    agent_id uuid not null,
     provider text not null default 'elevenlabs',
     external_id text,                           -- e.g. ElevenLabs conversation id
     channel text not null default 'web_voice'
@@ -82,7 +86,9 @@ create table public.calls (
                                     'escalated','emergency','answered','no_action')),
     cost_usd numeric(10,4) check (cost_usd >= 0),
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    unique (id, owner_id),
+    foreign key (agent_id, owner_id) references public.agents (id, owner_id) on delete cascade
 );
 create unique index on public.calls (provider, external_id) where external_id is not null;
 create index on public.calls (agent_id, started_at desc);
@@ -94,9 +100,9 @@ create index on public.calls (owner_id);
 create table public.appointments (
     id uuid primary key default gen_random_uuid(),
     owner_id uuid not null references auth.users(id) on delete cascade,
-    agent_id uuid not null references public.agents(id) on delete cascade,
-    customer_id uuid references public.customers(id) on delete set null,
-    call_id uuid references public.calls(id) on delete set null,
+    agent_id uuid not null,
+    customer_id uuid,
+    call_id uuid,
     service text not null,
     starts_at timestamptz not null,
     ends_at timestamptz not null,
@@ -108,7 +114,13 @@ create table public.appointments (
     source text not null default 'voice',
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    check (ends_at > starts_at)
+    check (ends_at > starts_at),
+    foreign key (agent_id, owner_id) references public.agents (id, owner_id) on delete cascade,
+    -- set null (col) clears only the link; owner_id stays (it is not null)
+    foreign key (customer_id, owner_id) references public.customers (id, owner_id)
+        on delete set null (customer_id),
+    foreign key (call_id, owner_id) references public.calls (id, owner_id)
+        on delete set null (call_id)
 );
 create index on public.appointments (agent_id, starts_at) where status = 'booked';
 create index on public.appointments (owner_id);
@@ -119,8 +131,8 @@ create index on public.appointments (owner_id);
 create table public.inbox_items (
     id uuid primary key default gen_random_uuid(),
     owner_id uuid not null references auth.users(id) on delete cascade,
-    agent_id uuid not null references public.agents(id) on delete cascade,
-    call_id uuid references public.calls(id) on delete set null,
+    agent_id uuid not null,
+    call_id uuid,
     kind text not null default 'message'
         check (kind in ('message','escalation','emergency','ticket','lead','callback')),
     caller_name text,
@@ -129,7 +141,10 @@ create table public.inbox_items (
     urgency text not null default 'normal' check (urgency in ('low','normal','high')),
     status text not null default 'open' check (status in ('open','done')),
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    foreign key (agent_id, owner_id) references public.agents (id, owner_id) on delete cascade,
+    foreign key (call_id, owner_id) references public.calls (id, owner_id)
+        on delete set null (call_id)
 );
 create index on public.inbox_items (agent_id, status, created_at desc);
 create index on public.inbox_items (owner_id);
@@ -140,7 +155,7 @@ create index on public.inbox_items (owner_id);
 create table public.status_records (
     id uuid primary key default gen_random_uuid(),
     owner_id uuid not null references auth.users(id) on delete cascade,
-    agent_id uuid not null references public.agents(id) on delete cascade,
+    agent_id uuid not null,
     kind text not null default 'order' check (kind in ('order','job')),
     reference text not null,                    -- order number, job number
     customer_phone text,
@@ -149,7 +164,8 @@ create table public.status_records (
     details jsonb not null default '{}'::jsonb, -- tracking link, ETA, items
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    unique (agent_id, kind, reference)
+    unique (agent_id, kind, reference),
+    foreign key (agent_id, owner_id) references public.agents (id, owner_id) on delete cascade
 );
 create index on public.status_records (owner_id);
 
