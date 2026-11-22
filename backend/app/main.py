@@ -5,6 +5,7 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes import me
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 
@@ -46,3 +47,6 @@ async def request_id(request: Request, call_next):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+app.include_router(me.router)
